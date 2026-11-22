@@ -22,4 +22,7 @@ nand is a small agent harness written in Go. The goal is to understand and expla
 
 ## Commands
 
-None yet. Add the exact build, test and lint commands here as soon as they exist.
+- Build: `go build ./...`
+- Vet: `go vet ./...`
+- Test: `go test -race ./...`
+- Run: `dotenv -e .env -- go run ./cmd/nand "hello"`
