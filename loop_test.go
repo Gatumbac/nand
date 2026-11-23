@@ -1,9 +1,11 @@
 package nand
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -356,5 +358,90 @@ func TestAgentPermissionGates(t *testing.T) {
 				t.Errorf("got tool msg %q, want %q", gotToolMsg, tc.wantToolMsg)
 			}
 		})
+	}
+}
+
+func TestAgentTruncationCostTracingAndCompaction(t *testing.T) {
+	provider := &fakeProvider{
+		responses: []CompletionResponse{
+			{
+				FinishReason: "tool_calls",
+				Message: Message{
+					Role:      RoleAssistant,
+					ToolCalls: []ToolCall{{ID: "c1", Name: "big"}},
+				},
+				Usage: Usage{InputTokens: 100_000, OutputTokens: 50_000, TotalTokens: 150_000},
+			},
+			{
+				FinishReason: "tool_calls",
+				Message: Message{
+					Role:      RoleAssistant,
+					ToolCalls: []ToolCall{{ID: "c2", Name: "big"}},
+				},
+				Usage: Usage{InputTokens: 100_000, OutputTokens: 50_000, TotalTokens: 150_000},
+			},
+			{
+				FinishReason: "tool_calls",
+				Message: Message{
+					Role:      RoleAssistant,
+					ToolCalls: []ToolCall{{ID: "c3", Name: "big"}},
+				},
+				Usage: Usage{InputTokens: 100_000, OutputTokens: 50_000, TotalTokens: 150_000},
+			},
+			{
+				FinishReason: "stop",
+				Message:      Message{Role: RoleAssistant, Content: "finished"},
+				Usage:        Usage{InputTokens: 100_000, OutputTokens: 50_000, TotalTokens: 150_000},
+			},
+		},
+	}
+
+	bigTool := &fakeTool{
+		name:       "big",
+		permission: PermissionRead,
+		runFn: func(_ context.Context, _ json.RawMessage) (string, error) {
+			return strings.Repeat("z", 200), nil
+		},
+	}
+	reg, err := NewRegistry(bigTool)
+	if err != nil {
+		t.Fatalf("NewRegistry error: %v", err)
+	}
+
+	var traceBuf bytes.Buffer
+	agent, err := NewAgent(AgentConfig{
+		Provider:           provider,
+		Registry:           reg,
+		Tracer:             NewJSONLTracer(&traceBuf),
+		Pricing:            Pricing{InputPerMillion: 1.0, OutputPerMillion: 2.0},
+		MaxToolOutputBytes: 40,
+		MaxContextChars:    120,
+	})
+	if err != nil {
+		t.Fatalf("NewAgent error: %v", err)
+	}
+
+	res, err := agent.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	if !strings.Contains(provider.requests[1].Messages[2].Content, "truncated: showing 40 of 200 bytes") {
+		t.Errorf("expected truncated tool output, got %q", provider.requests[1].Messages[2].Content)
+	}
+	if !strings.HasPrefix(provider.requests[3].Messages[2].Content, compactedPrefix) {
+		t.Errorf("expected older tool output to be compacted, got %q", provider.requests[3].Messages[2].Content)
+	}
+
+	wantCost := 0.80
+	if math.Abs(res.CostUSD-wantCost) > 1e-9 {
+		t.Errorf("got cost %f, want %f", res.CostUSD, wantCost)
+	}
+
+	traceText := traceBuf.String()
+	for _, wantType := range []string{`"type":"turn"`, `"type":"tool_call"`, `"type":"compaction"`, `"type":"finish"`} {
+		if !strings.Contains(traceText, wantType) {
+			t.Errorf("trace missing %s:\n%s", wantType, traceText)
+		}
 	}
 }
