@@ -247,3 +247,114 @@ func TestAgentEnforcesMaxTurns(t *testing.T) {
 		t.Errorf("got %d turns, want 2", res.Turns)
 	}
 }
+
+func TestAgentPermissionGates(t *testing.T) {
+	tests := []struct {
+		name        string
+		permission  PermissionLevel
+		approver    Approver
+		wantRan     bool
+		wantToolMsg string
+		wantErr     error
+	}{
+		{
+			name:        "read tool bypasses nil approver",
+			permission:  PermissionRead,
+			approver:    nil,
+			wantRan:     true,
+			wantToolMsg: "executed",
+		},
+		{
+			name:        "write tool denied when approver is nil",
+			permission:  PermissionWrite,
+			approver:    nil,
+			wantRan:     false,
+			wantToolMsg: `error: permission denied for tool "act"`,
+		},
+		{
+			name:       "exec tool denied by approver",
+			permission: PermissionExec,
+			approver: ApproverFunc(func(_ context.Context, _ ApprovalRequest) (bool, error) {
+				return false, nil
+			}),
+			wantRan:     false,
+			wantToolMsg: `error: permission denied for tool "act"`,
+		},
+		{
+			name:       "write tool allowed by approver",
+			permission: PermissionWrite,
+			approver: ApproverFunc(func(_ context.Context, req ApprovalRequest) (bool, error) {
+				return req.ToolName == "act" && req.Permission == PermissionWrite, nil
+			}),
+			wantRan:     true,
+			wantToolMsg: "executed",
+		},
+		{
+			name:       "approver error aborts loop",
+			permission: PermissionExec,
+			approver: ApproverFunc(func(_ context.Context, _ ApprovalRequest) (bool, error) {
+				return false, context.Canceled
+			}),
+			wantRan: false,
+			wantErr: context.Canceled,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ran := false
+			tool := &fakeTool{
+				name:       "act",
+				permission: tc.permission,
+				runFn: func(_ context.Context, _ json.RawMessage) (string, error) {
+					ran = true
+					return "executed", nil
+				},
+			}
+			provider := &fakeProvider{
+				responses: []CompletionResponse{
+					{
+						Message: Message{
+							Role:      RoleAssistant,
+							ToolCalls: []ToolCall{{ID: "call_1", Name: "act", Arguments: json.RawMessage(`{}`)}},
+						},
+					},
+					{
+						Message: Message{Role: RoleAssistant, Content: "done"},
+					},
+				},
+			}
+
+			reg, err := NewRegistry(tool)
+			if err != nil {
+				t.Fatalf("NewRegistry error: %v", err)
+			}
+			agent, err := NewAgent(AgentConfig{
+				Provider: provider,
+				Registry: reg,
+				Approver: tc.approver,
+			})
+			if err != nil {
+				t.Fatalf("NewAgent error: %v", err)
+			}
+
+			_, err = agent.Run(context.Background(), "go")
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("got err %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run error: %v", err)
+			}
+			if ran != tc.wantRan {
+				t.Errorf("tool ran=%v, want %v", ran, tc.wantRan)
+			}
+			gotToolMsg := provider.requests[1].Messages[2].Content
+			if gotToolMsg != tc.wantToolMsg {
+				t.Errorf("got tool msg %q, want %q", gotToolMsg, tc.wantToolMsg)
+			}
+		})
+	}
+}

@@ -2,6 +2,7 @@ package nand
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -13,6 +14,7 @@ var ErrMaxTurns = errors.New("agent reached maximum turn limit")
 type AgentConfig struct {
 	Provider Provider
 	Registry *Registry
+	Approver Approver
 	System   string
 	Model    string
 	MaxTurns int
@@ -28,6 +30,7 @@ type RunResult struct {
 type Agent struct {
 	provider Provider
 	registry *Registry
+	approver Approver
 	system   string
 	model    string
 	maxTurns int
@@ -46,6 +49,7 @@ func NewAgent(cfg AgentConfig) (*Agent, error) {
 	return &Agent{
 		provider: cfg.Provider,
 		registry: cfg.Registry,
+		approver: cfg.Approver,
 		system:   cfg.System,
 		model:    cfg.Model,
 		maxTurns: maxTurns,
@@ -116,6 +120,14 @@ func (a *Agent) executeOne(ctx context.Context, call ToolCall) (string, error) {
 		return fmt.Sprintf("error: unknown tool %q", call.Name), nil
 	}
 
+	allowed, err := a.checkPermission(ctx, tool, call.Arguments)
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
+		return fmt.Sprintf("error: permission denied for tool %q", call.Name), nil
+	}
+
 	output, err := tool.Run(ctx, call.Arguments)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -124,6 +136,20 @@ func (a *Agent) executeOne(ctx context.Context, call ToolCall) (string, error) {
 		return fmt.Sprintf("error: %s", err.Error()), nil
 	}
 	return output, nil
+}
+
+func (a *Agent) checkPermission(ctx context.Context, tool Tool, args json.RawMessage) (bool, error) {
+	if tool.Permission() == PermissionRead {
+		return true, nil
+	}
+	if a.approver == nil {
+		return false, nil
+	}
+	return a.approver.Approve(ctx, ApprovalRequest{
+		ToolName:   tool.Name(),
+		Permission: tool.Permission(),
+		Arguments:  args,
+	})
 }
 
 func addUsage(total, delta Usage) Usage {
