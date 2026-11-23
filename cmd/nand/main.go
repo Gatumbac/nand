@@ -24,19 +24,19 @@ type cliOptions struct {
 }
 
 func main() {
-	if err := run(context.Background(), os.Args[1:], os.Getenv, os.Stdout, os.Stderr); err != nil {
+	if err := run(context.Background(), os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
+func run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) error {
 	opts, err := parseOptions(args, getenv, stderr)
 	if err != nil {
 		return err
 	}
 
-	agent, err := buildAgent(opts)
+	agent, err := buildAgent(opts, newTerminalApprover(stdin, stderr))
 	if err != nil {
 		return err
 	}
@@ -50,7 +50,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	return err
 }
 
-func buildAgent(opts cliOptions) (*nand.Agent, error) {
+func buildAgent(opts cliOptions, approver nand.Approver) (*nand.Agent, error) {
 	client, err := openai.New(openai.Config{
 		BaseURL: opts.baseURL,
 		APIKey:  opts.apiKey,
@@ -60,7 +60,12 @@ func buildAgent(opts cliOptions) (*nand.Agent, error) {
 		return nil, err
 	}
 
-	registry, err := nand.NewRegistry(tools.NewRead())
+	registry, err := nand.NewRegistry(
+		tools.NewRead(),
+		tools.NewWrite(),
+		tools.NewEdit(),
+		tools.NewBash(""),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +73,7 @@ func buildAgent(opts cliOptions) (*nand.Agent, error) {
 	return nand.NewAgent(nand.AgentConfig{
 		Provider: client,
 		Registry: registry,
+		Approver: approver,
 		System:   opts.system,
 		MaxTurns: opts.maxTurns,
 	})
